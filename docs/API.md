@@ -171,3 +171,8 @@ The paths, methods, request bodies and response envelopes are the same as the or
 | 500 responses hide internal error text | Security. Details go to server logs |
 | `POST /api/users` and `PUT /api/users/{id}` require passwords of 8+ characters | Security baseline |
 | `POST /api/inventory/adjust` accepts only `STOCK_IN`, `STOCK_OUT`, `STOCK_ADJUSTMENT` | Unknown types used to fall through to "subtract" silently |
+| Only an OWNER can create/modify/deactivate OWNER accounts or grant the OWNER role | Prevents privilege escalation by ADMIN |
+| Changing a user's role needs `users.assign_role`; changing permissions needs `users.assign_permission`. Non-owners cannot grant permissions they don't hold | RBAC keys are enforced, not just listed |
+| A checkout with `discount > 0` needs `pos.apply_discount` | The permission existed but was never checked |
+| A product's `category_id` must exist (400 otherwise) | Foreign key integrity in PostgreSQL |
+| Editing `stock_quantity` from the product form writes a `STOCK_ADJUSTMENT` ledger row | Every stock change is traceable |
