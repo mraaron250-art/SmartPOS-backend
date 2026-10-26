@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         cacheDirectory=".phpunit.cache"
+         failOnWarning="true"
+         failOnRisky="true">
+    <testsuites>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <!-- Point at a THROWAWAY database: every test drops and recreates the schema. -->
+        <env name="DATABASE_URL" value="postgres://smartpos:smartpos@127.0.0.1:5433/smartpos_test"/>
+        <env name="JWT_SECRET" value="phpunit-secret-0123456789abcdefghijklmnop"/>
+        <env name="APP_ENV" value="testing"/>
+        <env name="APP_DEBUG" value="true"/>
+        <env name="APP_TIMEZONE" value="Asia/Manila"/>
+    </php>
+</phpunit>

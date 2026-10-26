@@ -42,6 +42,19 @@ curl http://localhost:8000/api/health
 
 The container runs migrations and seeds the demo data on first start.
 
+## Run tests
+
+Feature tests send real requests through the Kernel to a throwaway PostgreSQL database (`smartpos_test`). They cover auth, RBAC, checkout atomicity and idempotency, catalog, inventory, users, approvals, reports, and route ↔ contract parity.
+
+```bash
+docker compose up -d db
+docker compose exec db psql -U smartpos -c "CREATE DATABASE smartpos_test"   # once
+composer install
+vendor/bin/phpunit
+```
+
+CI (`.github/workflows/ci.yml`) runs PHPUnit, `composer audit`, the OpenAPI lint, and the Docker build on every push.
+
 ## Deploy
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
