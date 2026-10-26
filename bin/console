@@ -1,0 +1,56 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/*
+ * SmartPOS CLI
+ *   php bin/console migrate           Apply pending migrations
+ *   php bin/console seed [--if-empty] Seed demo data (--if-empty: skip when users exist)
+ *   php bin/console fresh [--seed]    Drop all tables, migrate, optionally seed
+ */
+
+use App\Core\Migrator;
+
+require dirname(__DIR__) . '/bootstrap/app.php';
+
+$command = $argv[1] ?? 'help';
+$flags = array_slice($argv, 2);
+$migrator = new Migrator(dirname(__DIR__) . '/database/migrations');
+
+$seed = function (bool $ifEmpty) {
+    $seeder = \Database\Seeders\DatabaseSeeder::class;
+    if (!class_exists($seeder)) {
+        fwrite(STDOUT, "No seeders defined yet.\n");
+        return;
+    }
+    $result = (new $seeder())->run($ifEmpty);
+    fwrite(STDOUT, $result . "\n");
+};
+
+try {
+    switch ($command) {
+        case 'migrate':
+            $ran = $migrator->migrate();
+            fwrite(STDOUT, $ran ? 'Migrated: ' . implode(', ', $ran) . "\n" : "Nothing to migrate.\n");
+            break;
+
+        case 'seed':
+            $seed(in_array('--if-empty', $flags, true));
+            break;
+
+        case 'fresh':
+            $ran = $migrator->fresh();
+            fwrite(STDOUT, 'Migrated: ' . implode(', ', $ran) . "\n");
+            if (in_array('--seed', $flags, true)) {
+                $seed(false);
+            }
+            break;
+
+        default:
+            fwrite(STDOUT, "Usage: php bin/console [migrate | seed [--if-empty] | fresh [--seed]]\n");
+    }
+} catch (Throwable $e) {
+    fwrite(STDERR, "Error: {$e->getMessage()}\n");
+    exit(1);
+}

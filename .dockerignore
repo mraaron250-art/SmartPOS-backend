@@ -1,0 +1,10 @@
+.git
+.github
+vendor
+tests
+.env
+.env.*
+!.env.example
+.phpunit.cache
+docker-compose.yml
+*.md
