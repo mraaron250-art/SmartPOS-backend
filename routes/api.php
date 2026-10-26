@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Core\Router;
+use App\Http\Controllers\DocsController;
 use App\Http\Controllers\HealthController;
 
 /*
@@ -13,4 +14,6 @@ use App\Http\Controllers\HealthController;
 return function (Router $router): void {
     // System
     $router->get('/api/health', [HealthController::class, 'show']);
+    $router->get('/api/docs', [DocsController::class, 'ui']);
+    $router->get('/api/docs/openapi.yaml', [DocsController::class, 'spec']);
 };

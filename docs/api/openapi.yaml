@@ -1,0 +1,1302 @@
+openapi: 3.1.0
+info:
+  title: SmartPOS REST API
+  version: 3.0.0
+  description: |
+    Contract between **SmartPOS-frontend** (Next.js) and **SmartPOS-backend** (PHP MVC + Eloquent + PostgreSQL).
+
+    ## Conventions
+    - All bodies are JSON (`Content-Type: application/json`).
+    - Success responses use the envelope `{ "success": true, "data": ..., "message"?: "..." }`.
+    - Error responses are always `{ "success": false, "message": "..." }`.
+    - IDs are **strings** (decimal digits), e.g. `"42"`.
+    - Money fields are numbers with 2 decimal places. Timestamps are ISO-8601 with offset (Asia/Manila).
+    - Paginated lists return `{ success, data: [...], pagination: { page, limit, total_records, total_pages } }`.
+
+    ## Authentication
+    `POST /api/auth/login` returns a JWT valid for 24 hours. Send it as `Authorization: Bearer <token>`.
+    The token is also set as the HTTP-only cookie `smartpos_token`. The cookie is accepted when no header is sent.
+
+    ## Authorization (RBAC)
+    Each endpoint lists its required permission under `x-permission`. `OWNER` passes every permission check.
+    Missing or invalid token: `401`. Missing permission: `403`.
+  contact:
+    name: SmartPOS Team
+servers:
+  - url: http://localhost:8000
+    description: Local (docker compose)
+  - url: https://smartpos-backend.onrender.com
+    description: Production (Render)
+
+tags:
+  - name: System
+  - name: Auth
+  - name: Products
+  - name: Categories
+  - name: Inventory
+  - name: Sales
+  - name: Reports
+  - name: Users
+  - name: Approvals
+  - name: Audit
+
+security:
+  - bearerAuth: []
+  - cookieAuth: []
+
+paths:
+  /api/health:
+    get:
+      operationId: getHealth
+      tags: [System]
+      summary: Service and database health
+      security: []
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: Database unreachable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  # ---------------------------------------------------------------- Auth
+  /api/auth/login:
+    post:
+      operationId: login
+      tags: [Auth]
+      summary: Log in with email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, example: owner@smartpos.local }
+                password: { type: string, example: password123 }
+      responses:
+        "200":
+          description: Logged in. Also sets the `smartpos_token` HTTP-only cookie.
+          headers:
+            Set-Cookie:
+              schema: { type: string, example: "smartpos_token=eyJ...; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, token, user, data]
+                properties:
+                  success: { const: true }
+                  message: { type: string, example: Login successful. }
+                  token: { type: string }
+                  user: { $ref: "#/components/schemas/SessionUser" }
+                  data:
+                    type: object
+                    properties:
+                      token: { type: string }
+                      user: { $ref: "#/components/schemas/SessionUser" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Account inactive
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/auth/logout:
+    post:
+      operationId: logout
+      tags: [Auth]
+      summary: Log out (clears the cookie, writes an audit entry when a token is present)
+      security: []
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+
+  /api/auth/me:
+    get:
+      operationId: getCurrentUser
+      tags: [Auth]
+      summary: Current user from the token
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  user: { $ref: "#/components/schemas/SessionUser" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ---------------------------------------------------------------- Products
+  /api/products:
+    get:
+      operationId: listProducts
+      tags: [Products]
+      summary: List products (sorted by name)
+      x-permission: products.view
+      parameters:
+        - { name: category_id, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: search, in: query, description: "Matches name, SKU or barcode (case-insensitive)", schema: { type: string } }
+        - { name: low_stock, in: query, description: "`true` = stock_quantity <= reorder_level", schema: { type: string, enum: ["true", "false"] } }
+        - $ref: "#/components/parameters/Page"
+        - { name: limit, in: query, schema: { type: integer, default: 100, minimum: 1 } }
+      responses:
+        "200":
+          description: Paginated products
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedBase"
+                  - properties:
+                      data: { type: array, items: { $ref: "#/components/schemas/Product" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createProduct
+      tags: [Products]
+      summary: Create a product
+      x-permission: products.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/products/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Numeric product ID, or a SKU
+        schema: { type: string }
+    get:
+      operationId: getProduct
+      tags: [Products]
+      summary: Get one product
+      x-permission: products.view
+      responses:
+        "200":
+          description: Product
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: updateProduct
+      tags: [Products]
+      summary: Update a product (partial update; only sent fields change)
+      x-permission: products.edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      operationId: deactivateProduct
+      tags: [Products]
+      summary: Deactivate a product (soft delete, status = INACTIVE)
+      x-permission: products.deactivate
+      responses:
+        "200":
+          description: Deactivated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/products/{id}/status:
+    patch:
+      operationId: setProductStatus
+      tags: [Products]
+      summary: Set product status
+      x-permission: products.deactivate
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: "#/components/schemas/Status" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------------------------------------------------------------- Categories
+  /api/categories:
+    get:
+      operationId: listCategories
+      tags: [Categories]
+      summary: List categories (sorted by name)
+      x-permission: categories.view
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: search, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Categories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  data: { type: array, items: { $ref: "#/components/schemas/Category" } }
+    post:
+      operationId: createCategory
+      tags: [Categories]
+      summary: Create a category
+      x-permission: categories.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: Frozen Goods }
+                description: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CategoryEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/categories/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      operationId: getCategory
+      tags: [Categories]
+      summary: Get one category
+      x-permission: categories.view
+      responses:
+        "200":
+          description: Category
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CategoryEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: updateCategory
+      tags: [Categories]
+      summary: Update a category
+      x-permission: categories.edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                status: { $ref: "#/components/schemas/Status" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CategoryEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      operationId: deactivateCategory
+      tags: [Categories]
+      summary: Deactivate a category (soft delete)
+      x-permission: categories.deactivate
+      responses:
+        "200":
+          description: Deactivated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------------------------------------------------------------- Inventory
+  /api/inventory:
+    get:
+      operationId: getInventoryDashboard
+      tags: [Inventory]
+      summary: Inventory valuation dashboard (active products only)
+      x-permission: inventory.view
+      responses:
+        "200":
+          description: Totals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  data: { $ref: "#/components/schemas/InventoryDashboard" }
+
+  /api/inventory/adjust:
+    post:
+      operationId: adjustStock
+      tags: [Inventory]
+      summary: Stock in / stock out / adjustment
+      description: |
+        `STOCK_IN` and `STOCK_ADJUSTMENT` add `quantity`; `STOCK_OUT` subtracts it.
+        The update is atomic and stock can never go below zero.
+      x-permission: inventory.adjust
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id, transaction_type, quantity]
+              properties:
+                product_id: { type: string, description: Product ID or SKU }
+                transaction_type: { type: string, enum: [STOCK_IN, STOCK_OUT, STOCK_ADJUSTMENT] }
+                quantity: { type: integer, minimum: 1 }
+                reason: { type: string }
+                reference_id: { type: string }
+      responses:
+        "200":
+          description: Adjusted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  message: { type: string }
+                  data:
+                    type: object
+                    properties:
+                      product:
+                        type: object
+                        properties:
+                          id: { type: string }
+                          name: { type: string }
+                          sku: { type: string }
+                          previous_stock: { type: integer }
+                          new_stock: { type: integer }
+                      transaction: { $ref: "#/components/schemas/InventoryTransaction" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/inventory/history:
+    get:
+      operationId: listInventoryHistory
+      tags: [Inventory]
+      summary: Inventory movement ledger (newest first)
+      x-permission: inventory.view_history
+      parameters:
+        - { name: product_id, in: query, schema: { type: string } }
+        - { name: transaction_type, in: query, schema: { $ref: "#/components/schemas/InventoryTxType" } }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit20"
+      responses:
+        "200":
+          description: Paginated ledger
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedBase"
+                  - properties:
+                      data: { type: array, items: { $ref: "#/components/schemas/InventoryTransaction" } }
+
+  # ---------------------------------------------------------------- Sales
+  /api/sales:
+    get:
+      operationId: listSales
+      tags: [Sales]
+      summary: List sales (newest first)
+      x-permission: transactions.view
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/SaleStatus" } }
+        - { name: payment_method, in: query, schema: { type: string } }
+        - { name: user_id, in: query, schema: { type: string } }
+        - { name: search, in: query, description: Matches transaction number or cashier name, schema: { type: string } }
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit20"
+      responses:
+        "200":
+          description: Paginated sales
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedBase"
+                  - properties:
+                      data: { type: array, items: { $ref: "#/components/schemas/Sale" } }
+
+  /api/sales/checkout:
+    post:
+      operationId: checkout
+      tags: [Sales]
+      summary: Atomic POS checkout
+      description: |
+        In one database transaction, checkout:
+        1. Locks and decrements stock with `UPDATE ... WHERE stock_quantity >= qty`. Overselling is impossible.
+        2. Inserts the sale, its items, the inventory ledger rows and an audit log entry.
+
+        **Idempotent:** if `transaction_number` already exists, checkout returns the existing sale with `201` and changes no stock.
+        The offline queue relies on this (`TXN-OFFLINE-YYYYMMDD-NNNNNN`).
+        Prices always come from the database. Client-sent prices are ignored.
+      x-permission: pos.create_sale
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items, amount_received]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [product_id, quantity]
+                    properties:
+                      product_id: { type: string, description: Product ID or SKU }
+                      quantity: { type: integer, minimum: 1 }
+                payment_method: { type: string, default: Cash, example: Cash }
+                amount_received: { type: number }
+                discount: { type: number, default: 0, minimum: 0 }
+                transaction_number: { type: string, description: Idempotency key; generated when omitted }
+                user_id: { type: string, description: Ignored; the cashier is always the token's user }
+      responses:
+        "201":
+          description: Sale completed (or the existing sale for a repeated transaction_number)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SaleEnvelope" }
+        "400":
+          description: Empty cart, invalid quantity, inactive product, insufficient stock, discount > subtotal, or underpayment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sales/{id}:
+    get:
+      operationId: getSale
+      tags: [Sales]
+      summary: Get one sale
+      x-permission: transactions.view_details
+      parameters:
+        - { name: id, in: path, required: true, description: Sale ID or transaction number, schema: { type: string } }
+      responses:
+        "200":
+          description: Sale
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SaleEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/sales/{id}/cancel:
+    post:
+      operationId: cancelSale
+      tags: [Sales]
+      summary: Cancel a sale and restock its items
+      x-permission: transactions.cancel
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, default: Customer cancellation / return }
+      responses:
+        "200":
+          description: Cancelled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SaleEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/sales/{id}/reprint:
+    post:
+      operationId: reprintReceipt
+      tags: [Sales]
+      summary: Reprint a receipt (returns the sale, writes an audit entry)
+      x-permission: pos.reprint_receipt
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Sale
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SaleEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------------------------------------------------------------- Reports
+  /api/reports/dashboard:
+    get:
+      operationId: getDashboardReport
+      tags: [Reports]
+      summary: Dashboard KPIs
+      x-permission: reports.view
+      responses:
+        "200":
+          description: KPIs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  data: { $ref: "#/components/schemas/DashboardReport" }
+
+  /api/reports/sales:
+    get:
+      operationId: getSalesReport
+      tags: [Reports]
+      summary: Sales summary and daily breakdown (COMPLETED sales)
+      x-permission: reports.view_sales
+      parameters:
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+      responses:
+        "200":
+          description: Report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  data:
+                    type: object
+                    properties:
+                      summary:
+                        type: object
+                        properties:
+                          gross_sales: { type: number }
+                          total_discounts: { type: number }
+                          net_sales: { type: number }
+                          total_transactions: { type: integer }
+                      daily:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            date: { type: string, format: date }
+                            total_sales: { type: number }
+                            transactions: { type: integer }
+
+  /api/reports/product-sales:
+    get:
+      operationId: getProductSalesReport
+      tags: [Reports]
+      summary: Units sold and revenue per product (COMPLETED sales, highest revenue first)
+      x-permission: reports.view_sales
+      parameters:
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+      responses:
+        "200":
+          description: Rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        product_id: { type: string }
+                        name: { type: string }
+                        sku: { type: string }
+                        units_sold: { type: integer }
+                        total_revenue: { type: number }
+
+  # ---------------------------------------------------------------- Users
+  /api/users:
+    get:
+      operationId: listUsers
+      tags: [Users]
+      summary: List users (sorted by name)
+      x-permission: users.view
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: role, in: query, schema: { $ref: "#/components/schemas/Role" } }
+        - { name: search, in: query, description: Matches name or email, schema: { type: string } }
+      responses:
+        "200":
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  data: { type: array, items: { $ref: "#/components/schemas/User" } }
+    post:
+      operationId: createUser
+      tags: [Users]
+      summary: Create a user (permissions default to the role's set)
+      x-permission: users.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, role]
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                role: { $ref: "#/components/schemas/Role" }
+                permissions: { type: array, items: { type: string } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/users/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      operationId: getUser
+      tags: [Users]
+      summary: Get one user
+      x-permission: users.view
+      responses:
+        "200":
+          description: User
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: updateUser
+      tags: [Users]
+      summary: Update a user. A role change without `permissions` resets permissions to the role default.
+      x-permission: users.edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                role: { $ref: "#/components/schemas/Role" }
+                status: { $ref: "#/components/schemas/Status" }
+                permissions: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      operationId: deactivateUser
+      tags: [Users]
+      summary: Deactivate a user (you cannot deactivate yourself)
+      x-permission: users.deactivate
+      responses:
+        "200":
+          description: Deactivated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/users/{id}/permissions:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      operationId: getUserPermissions
+      tags: [Users]
+      summary: A user's permissions
+      x-permission: users.view
+      responses:
+        "200":
+          description: Permissions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  data:
+                    type: object
+                    properties:
+                      userId: { type: string }
+                      name: { type: string }
+                      role: { $ref: "#/components/schemas/Role" }
+                      permissions: { type: array, items: { type: string } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: assignPermission
+      tags: [Users]
+      summary: Grant one permission
+      x-permission: users.assign_permission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permission]
+              properties:
+                permission: { $ref: "#/components/schemas/Permission" }
+      responses:
+        "200":
+          description: Updated permission list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  message: { type: string }
+                  data: { type: array, items: { type: string } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------------------------------------------------------------- Approvals
+  /api/approvals:
+    get:
+      operationId: listApprovals
+      tags: [Approvals]
+      summary: List approval requests (newest first)
+      x-permission: approvals.view
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/ApprovalStatus" } }
+        - { name: module, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { const: true }
+                  data: { type: array, items: { $ref: "#/components/schemas/ApprovalRequest" } }
+    post:
+      operationId: createApproval
+      tags: [Approvals]
+      summary: Submit an approval request (any authenticated user)
+      x-permission: (authenticated)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, module]
+              properties:
+                action: { type: string, example: VIP_DISCOUNT_30 }
+                module: { type: string, example: POS }
+                target_type: { type: string }
+                target_id: { type: string }
+                reason: { type: string }
+      responses:
+        "201":
+          description: Submitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApprovalEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/approvals/{id}/approve:
+    post:
+      operationId: approveRequest
+      tags: [Approvals]
+      summary: Approve a pending request (self-approval is forbidden)
+      x-permission: approvals.approve
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment: { type: string, default: Approved by manager }
+      responses:
+        "200":
+          description: Approved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApprovalEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/approvals/{id}/reject:
+    post:
+      operationId: rejectRequest
+      tags: [Approvals]
+      summary: Reject a pending request (self-review is forbidden)
+      x-permission: approvals.reject
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment: { type: string, default: Rejected by manager }
+      responses:
+        "200":
+          description: Rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApprovalEnvelope" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  # ---------------------------------------------------------------- Audit
+  /api/audit-logs:
+    get:
+      operationId: listAuditLogs
+      tags: [Audit]
+      summary: Immutable audit trail (newest first)
+      x-permission: system.audit_logs
+      parameters:
+        - { name: module, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: user_id, in: query, schema: { type: string } }
+        - { name: result, in: query, schema: { type: string, enum: [SUCCESS, FAILURE] } }
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+        - $ref: "#/components/parameters/Page"
+        - { name: limit, in: query, schema: { type: integer, default: 25, minimum: 1 } }
+      responses:
+        "200":
+          description: Paginated logs
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedBase"
+                  - properties:
+                      data: { type: array, items: { $ref: "#/components/schemas/AuditLog" } }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: smartpos_token
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[0-9]+$" }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, default: 1, minimum: 1 }
+    Limit20:
+      name: limit
+      in: query
+      schema: { type: integer, default: 20, minimum: 1 }
+    DateFrom:
+      name: date_from
+      in: query
+      description: Inclusive start date (YYYY-MM-DD)
+      schema: { type: string, format: date }
+    DateTo:
+      name: date_to
+      in: query
+      description: Inclusive end date (YYYY-MM-DD), up to 23:59:59.999
+      schema: { type: string, format: date }
+
+  responses:
+    BadRequest:
+      description: Validation or business-rule error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing, invalid or expired token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Missing permission
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Duplicate unique value (SKU, barcode, category name, email)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [success, message]
+      properties:
+        success: { const: false }
+        message: { type: string, example: "Forbidden: Missing required permission [products.create]." }
+
+    Message:
+      type: object
+      required: [success, message]
+      properties:
+        success: { const: true }
+        message: { type: string }
+
+    Health:
+      type: object
+      properties:
+        status: { type: string, enum: [healthy, unhealthy] }
+        timestamp: { type: string, format: date-time }
+        database: { type: string, example: connected (PostgreSQL) }
+        framework: { type: string }
+        version: { type: string }
+
+    PaginatedBase:
+      type: object
+      required: [success, data, pagination]
+      properties:
+        success: { const: true }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+
+    Pagination:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total_records: { type: integer }
+        total_pages: { type: integer }
+
+    Role: { type: string, enum: [OWNER, ADMIN, STAFF] }
+    Status: { type: string, enum: [ACTIVE, INACTIVE] }
+    SaleStatus: { type: string, enum: [COMPLETED, CANCELLED, REFUNDED] }
+    InventoryTxType: { type: string, enum: [SALE, STOCK_IN, STOCK_OUT, STOCK_ADJUSTMENT] }
+    ApprovalStatus: { type: string, enum: [PENDING, APPROVED, REJECTED, CANCELLED] }
+
+    Permission:
+      type: string
+      description: One of the 39 RBAC permission keys
+      enum:
+        - pos.view
+        - pos.create_sale
+        - pos.apply_discount
+        - pos.cancel_sale
+        - pos.reprint_receipt
+        - products.view
+        - products.create
+        - products.edit
+        - products.deactivate
+        - categories.view
+        - categories.create
+        - categories.edit
+        - categories.deactivate
+        - inventory.view
+        - inventory.adjust
+        - inventory.stock_in
+        - inventory.stock_out
+        - inventory.view_history
+        - transactions.view
+        - transactions.view_details
+        - transactions.cancel
+        - transactions.refund
+        - transactions.reprint
+        - reports.view
+        - reports.view_sales
+        - reports.view_inventory
+        - reports.export
+        - users.view
+        - users.create
+        - users.edit
+        - users.deactivate
+        - users.assign_role
+        - users.assign_permission
+        - system.settings
+        - system.configuration
+        - system.audit_logs
+        - approvals.view
+        - approvals.approve
+        - approvals.reject
+
+    SessionUser:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        permissions: { type: array, items: { type: string } }
+
+    User:
+      type: object
+      description: Never includes the password hash.
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        status: { $ref: "#/components/schemas/Status" }
+        permissions: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UserEnvelope:
+      type: object
+      properties:
+        success: { const: true }
+        message: { type: string }
+        data: { $ref: "#/components/schemas/User" }
+
+    Category:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        status: { $ref: "#/components/schemas/Status" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CategoryEnvelope:
+      type: object
+      properties:
+        success: { const: true }
+        message: { type: string }
+        data: { $ref: "#/components/schemas/Category" }
+
+    Product:
+      type: object
+      properties:
+        id: { type: string }
+        category_id: { type: [string, "null"] }
+        category_name: { type: string }
+        sku: { type: string, example: BEV-001 }
+        barcode: { type: [string, "null"] }
+        name: { type: string }
+        description: { type: string }
+        cost_price: { type: number }
+        selling_price: { type: number }
+        stock_quantity: { type: integer }
+        reorder_level: { type: integer }
+        status: { $ref: "#/components/schemas/Status" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ProductCreate:
+      type: object
+      required: [name, sku, category_id, selling_price]
+      properties:
+        name: { type: string }
+        sku: { type: string, description: Stored upper-case }
+        barcode: { type: string }
+        category_id: { type: string }
+        cost_price: { type: number, default: 0 }
+        selling_price: { type: number }
+        stock_quantity: { type: integer, default: 0 }
+        reorder_level: { type: integer, default: 10 }
+        description: { type: string }
+    ProductUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        sku: { type: string }
+        barcode: { type: string }
+        category_id: { type: string }
+        cost_price: { type: number }
+        selling_price: { type: number }
+        stock_quantity: { type: integer }
+        reorder_level: { type: integer }
+        description: { type: string }
+        status: { $ref: "#/components/schemas/Status" }
+    ProductEnvelope:
+      type: object
+      properties:
+        success: { const: true }
+        message: { type: string }
+        data: { $ref: "#/components/schemas/Product" }
+
+    SaleItem:
+      type: object
+      properties:
+        product_id: { type: string }
+        product_name: { type: string }
+        sku: { type: string }
+        quantity: { type: integer }
+        unit_price: { type: number }
+        subtotal: { type: number }
+    Sale:
+      type: object
+      properties:
+        id: { type: string }
+        transaction_number: { type: string, example: TXN-20261026-482913 }
+        user_id: { type: string }
+        cashier_name: { type: string }
+        items: { type: array, items: { $ref: "#/components/schemas/SaleItem" } }
+        subtotal: { type: number }
+        discount: { type: number }
+        total_amount: { type: number }
+        payment_method: { type: string }
+        amount_received: { type: number }
+        change_amount: { type: number }
+        status: { $ref: "#/components/schemas/SaleStatus" }
+        offline_synced: { type: boolean }
+        created_at: { type: string, format: date-time }
+    SaleEnvelope:
+      type: object
+      properties:
+        success: { const: true }
+        message: { type: string }
+        data: { $ref: "#/components/schemas/Sale" }
+
+    InventoryTransaction:
+      type: object
+      properties:
+        id: { type: string }
+        product_id: { type: string }
+        product_name: { type: string }
+        user_id: { type: [string, "null"] }
+        user_name: { type: string }
+        transaction_type: { $ref: "#/components/schemas/InventoryTxType" }
+        quantity: { type: integer, description: Signed stock delta }
+        previous_stock: { type: integer }
+        new_stock: { type: integer }
+        reference_id: { type: string }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
+
+    InventoryDashboard:
+      type: object
+      properties:
+        total_products: { type: integer }
+        total_units: { type: integer }
+        total_inventory_value: { type: number }
+        total_retail_value: { type: number }
+        low_stock_count: { type: integer }
+        out_of_stock_count: { type: integer }
+
+    DashboardReport:
+      type: object
+      description: |
+        Nested period totals, plus flat fields (`today_sales`, `today_transactions`, `total_units`,
+        `avg_sale_value`) that the dashboard and reports views read directly.
+      properties:
+        today: { $ref: "#/components/schemas/PeriodTotals" }
+        yesterday: { $ref: "#/components/schemas/PeriodTotals" }
+        this_month: { $ref: "#/components/schemas/PeriodTotals" }
+        active_products_count: { type: integer }
+        low_stock_count: { type: integer }
+        top_products:
+          type: array
+          items:
+            type: object
+            properties:
+              product_name: { type: string }
+              quantity_sold: { type: integer }
+              revenue: { type: number }
+        today_sales: { type: number }
+        today_transactions: { type: integer }
+        total_units: { type: integer, description: Units in stock across active products }
+        avg_sale_value: { type: number, description: Today's average completed sale }
+    PeriodTotals:
+      type: object
+      properties:
+        total_sales: { type: number }
+        transaction_count: { type: integer }
+
+    ApprovalRequest:
+      type: object
+      properties:
+        id: { type: string }
+        requested_by: { type: string }
+        requester_name: { type: string }
+        action: { type: string }
+        module: { type: string }
+        target_type: { type: string }
+        target_id: { type: [string, "null"] }
+        reason: { type: string }
+        status: { $ref: "#/components/schemas/ApprovalStatus" }
+        reviewed_by: { type: [string, "null"] }
+        reviewer_name: { type: [string, "null"] }
+        review_comment: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        reviewed_at: { type: [string, "null"], format: date-time }
+    ApprovalEnvelope:
+      type: object
+      properties:
+        success: { const: true }
+        message: { type: string }
+        data: { $ref: "#/components/schemas/ApprovalRequest" }
+
+    AuditLog:
+      type: object
+      properties:
+        id: { type: string }
+        user_id: { type: [string, "null"] }
+        user_name: { type: string }
+        action: { type: string, example: POS_CHECKOUT }
+        module: { type: string, example: POS }
+        target_type: { type: string }
+        target_id: { type: [string, "null"] }
+        result: { type: string, enum: [SUCCESS, FAILURE] }
+        details: { type: string }
+        created_at: { type: string, format: date-time }

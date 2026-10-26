@@ -45,3 +45,19 @@ The container runs migrations and seeds the demo data on first start.
 ## Deploy
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+## Documentation
+
+| Doc | What's inside |
+| :--- | :--- |
+| [docs/api/openapi.yaml](docs/api/openapi.yaml) | **API contract** (OpenAPI 3.1). Source of truth for frontend ↔ backend |
+| [docs/API.md](docs/API.md) | Plain-language API guide: auth, RBAC, endpoints, checkout rules |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | MVC layers, request lifecycle, data model, concurrency, security |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Step-by-step Render + Vercel deploy |
+| `GET /api/docs` | Interactive Swagger UI (served by the API) |
+
+Lint the contract:
+
+```bash
+npx @redocly/cli lint docs/api/openapi.yaml
+```

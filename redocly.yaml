@@ -1,0 +1,8 @@
+extends:
+  - recommended
+rules:
+  # Error shapes are shared via components/responses; not every read-only op lists 4xx.
+  operation-4xx-response: off
+  tag-description: off
+  info-license: off
+  no-server-example.com: off
