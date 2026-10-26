@@ -86,7 +86,7 @@ Each endpoint needs one permission key. **OWNER passes every check.**
 | ADMIN | All except `users.assign_permission` and `system.configuration` |
 | STAFF | `pos.view`, `pos.create_sale`, `pos.apply_discount`, `pos.reprint_receipt`, `products.view`, `categories.view`, `inventory.view`, `transactions.view`, `transactions.view_details` |
 
-The permissions are copied into the JWT at login. A change to a user's permissions takes effect at their next login.
+On every request the server re-loads the user from the database. So a deactivated user is locked out immediately, and permission changes apply on the next request. The `permissions` list in the login response is for the UI only.
 
 ---
 

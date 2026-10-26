@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Core\Router;
+use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DocsController;
 use App\Http\Controllers\HealthController;
 
@@ -16,4 +17,9 @@ return function (Router $router): void {
     $router->get('/api/health', [HealthController::class, 'show']);
     $router->get('/api/docs', [DocsController::class, 'ui']);
     $router->get('/api/docs/openapi.yaml', [DocsController::class, 'spec']);
+
+    // Auth
+    $router->post('/api/auth/login', [AuthController::class, 'login']);
+    $router->post('/api/auth/logout', [AuthController::class, 'logout']);
+    $router->get('/api/auth/me', [AuthController::class, 'me'], ['auth']);
 };
